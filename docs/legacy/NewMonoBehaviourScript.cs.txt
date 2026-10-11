@@ -1,0 +1,437 @@
+using UnityEngine;
+using OpenCvSharp;
+using System;
+using System.Collections;
+using UnityEngine.UI;
+using System.Runtime.InteropServices;
+using Mediapipe;
+using Mediapipe.Tasks.Vision.FaceLandmarker;
+using System.Threading;
+
+// このスクリプトは、シーン内の適当なGameObjectにアタッチしてください。
+public class CameraCalibrator : MonoBehaviour
+{
+    public GameObject trueReye;
+    public GameObject trueLeye;
+    private Camera Rcam;
+    private Camera Lcam;
+    public float distmultiplier;
+
+    //表に出す部分
+    [Header("Camera 1")]
+    public int cameraIndex = 2;
+    public GameObject Reye;
+    public GameObject Leye;
+    public RenderTexture displayRenderTexture1; // 最終的に表示するRenderTexture
+    public RawImage displayRawImage1;           // RenderTextureを表示するUI
+
+    [Header("Camera 2")]
+    public int camera2Index = 0;
+    public GameObject Reye2;
+    public GameObject Leye2;
+    public RenderTexture displayRenderTexture2; // 最終的に表示するRenderTexture
+    public RawImage displayRawImage2;           // RenderTextureを表示するUI
+
+
+    //mediapipe,OpenCV関連で共通のもの
+    public TextAsset modelAsset;
+    FaceLandmarkerOptions options;
+    FaceLandmarker faceLandmarker;
+    FaceLandmarker faceLandmarker2;
+    System.Diagnostics.Stopwatch stopwatch;
+    private Mat map1, map2;
+    private Mat cameraMatrix;
+    private Mat distCoeffs;
+
+    //カメラ1用の変数
+    private VideoCapture capture1;
+    private Mat frame1;
+    private Mat undistortedFrame1;
+    private Texture2D outputTexture1;
+    private Mat rgbFrame1; // BGRからRGBに変換後、格納するためのMat
+    private byte[] pixelData1; // MatからC#側にピクセルデータをコピーするための一時的な配列
+    private Mat resizedRgbFrame1;
+    private Texture2D mediaPipeTexture1;
+    private byte[] mediaPipePixelData1;
+
+    //カメラ2用の変数
+    private VideoCapture capture2;
+    private Mat frame2;
+    private Mat undistortedFrame2;
+    private Texture2D outputTexture2;
+    private Mat rgbFrame2; // BGRからRGBに変換後、格納するためのMat
+    private byte[] pixelData2; // MatからC#側にピクセルデータをコピーするための一時的な配列
+    private Mat resizedRgbFrame2;
+    private Texture2D mediaPipeTexture2;
+    private byte[] mediaPipePixelData2;
+
+
+
+    //スレッド処理
+    private Thread cameraThread1,cameraThread2;
+    private volatile bool isThreadRunning = false;
+    private readonly object frameLock = new object();
+    private readonly object frameLock2 = new object();
+    private Mat latestFrame1, latestFrame2;
+    private bool newFrameAvailable1 = false, newFrameAvailable2 = false;
+    //スレッド処理ここまで
+
+    private float Reye1x;
+    private float Reye1y;
+    private float Reye2x;
+    private float Reye2y;
+    private float Leye1x;
+    private float Leye1y;
+    private float Leye2x;
+    private float Leye2y;
+    private const float camwidth = 1920;
+    private const float camheight = 1080;
+
+    void Start()
+    {
+        // 1. Resourcesフォルダからキャリブレーションファイルを読み込む
+        if (!LoadCalibrationData())
+        {
+            // 読み込みに失敗したらカメラの初期化に進まない
+            this.enabled = false; // このコンポーネントを無効化する
+            return;
+        }
+        // 2. カメラの準備
+        capture1 = new VideoCapture(cameraIndex);
+        capture2 = new VideoCapture(camera2Index);
+        if (!capture1.IsOpened() || !capture2.IsOpened())
+        {
+            Debug.LogError("カメラを開けませんでした。");
+            this.enabled = false;
+            return;
+        }
+        capture1.Set(VideoCaptureProperties.FourCC, FourCC.FromString("MJPG"));
+        capture1.Set(VideoCaptureProperties.FrameWidth, 1920);
+        capture1.Set(VideoCaptureProperties.FrameHeight, 1080);
+        capture2.Set(VideoCaptureProperties.FourCC, FourCC.FromString("MJPG"));
+        capture2.Set(VideoCaptureProperties.FrameWidth, 1920);
+        capture2.Set(VideoCaptureProperties.FrameHeight, 1080);
+        frame1 = new Mat();
+        frame2 = new Mat();
+        undistortedFrame1 = new Mat();
+        undistortedFrame2 = new Mat();
+        rgbFrame1 = new Mat();
+        rgbFrame2 = new Mat();
+        map1 = new Mat();
+        map2 = new Mat();
+        resizedRgbFrame1 = new Mat();
+        resizedRgbFrame2 = new Mat();
+        Debug.Log("カメラの初期化が完了しました。");// ★ Start時点で歪み補正マップを一度だけ計算する
+        var frameSize = new Size(1920, 1080);
+        Mat newCameraMatrix = Cv2.GetOptimalNewCameraMatrix(cameraMatrix, distCoeffs, frameSize, 0, frameSize, out OpenCvSharp.Rect roi,true);
+        Cv2.InitUndistortRectifyMap(cameraMatrix, distCoeffs, new Mat(), newCameraMatrix, frameSize, MatType.CV_32FC1, map1, map2);
+
+        Debug.Log("カメラの初期化と歪み補正マップの計算が完了しました。");
+
+        if (displayRawImage1 != null && displayRenderTexture1 != null)
+        {
+            displayRawImage1.texture = displayRenderTexture1;
+        }
+        if (displayRawImage2 != null && displayRenderTexture2 != null)
+        {
+            displayRawImage2.texture = displayRenderTexture2;
+        }
+        options = new FaceLandmarkerOptions(
+            baseOptions: new Mediapipe.Tasks.Core.BaseOptions(
+            Mediapipe.Tasks.Core.BaseOptions.Delegate.CPU,
+            modelAssetBuffer: modelAsset.bytes
+            ),
+            runningMode: Mediapipe.Tasks.Vision.Core.RunningMode.VIDEO
+        );
+        faceLandmarker = FaceLandmarker.CreateFromOptions(options);
+        faceLandmarker2 = FaceLandmarker.CreateFromOptions(options);
+        stopwatch = new System.Diagnostics.Stopwatch();
+        stopwatch.Start();
+
+        //スレッド処理準備
+        latestFrame1 = new Mat();
+        isThreadRunning = true;
+        cameraThread1 = new Thread(CameraCaptureLoop);
+        cameraThread1.IsBackground = true;
+        cameraThread1.Start();
+
+        latestFrame2 = new Mat();
+        cameraThread2 = new Thread(CameraCaptureLoop2);
+        cameraThread2.IsBackground = true;
+        cameraThread2.Start();
+
+        Reye1x = 0;
+        Reye1y = 0;
+        Reye2x = 0;
+        Reye2y = 0;
+        Leye1x = 0;
+        Leye1y = 0;
+        Leye2x = 0;
+        Leye2y = 0;
+
+        Rcam = trueReye.GetComponent<Camera>();
+        Lcam = trueLeye.GetComponent<Camera>();
+    }
+    private void CameraCaptureLoop()
+    {
+        // このスレッド内でのみ使用するMat
+        Mat capturedFrame = new Mat();
+        while (isThreadRunning)
+        {
+            if (capture1.IsOpened() && capture1.Grab())
+            {
+                capture1.Retrieve(capturedFrame);
+                if (!capturedFrame.Empty())
+                {
+                    // lockステートメントで排他制御し、安全にデータをコピーする
+                    lock (frameLock)
+                    {
+                        capturedFrame.CopyTo(latestFrame1);
+                        newFrameAvailable1 = true;
+                    }
+                }
+            }
+            // CPU負荷を過度に上げないための短い待機
+            Thread.Sleep(5);
+        }
+        capturedFrame.Dispose();
+    }
+    private void CameraCaptureLoop2()
+    {
+        // このスレッド内でのみ使用するMat
+        Mat capturedFrame = new Mat();
+        while (isThreadRunning)
+        {
+            if (capture2.IsOpened() && capture2.Grab())
+            {
+                capture2.Retrieve(capturedFrame);
+                if (!capturedFrame.Empty())
+                {
+                    // lockステートメントで排他制御し、安全にデータをコピーする
+                    lock (frameLock2)
+                    {
+                        capturedFrame.CopyTo(latestFrame2);
+                        newFrameAvailable2 = true;
+                    }
+                }
+            }
+            // CPU負荷を過度に上げないための短い待機
+            Thread.Sleep(5);
+        }
+        capturedFrame.Dispose();
+    }
+
+    void Update()
+    {
+        frame1update();
+        frame2update();
+        //this part is hardcoded,this should be dynamically loaded from calibration.xml, but I will use same webcam for komafes. So fuck it.
+        float Baselinelength = 150f;//mm
+        float xf = 1126.9077356460014f;
+        float xc = 974.11696203431347f;
+        float yf = 1127.8798084582536f;
+        float yc = 533.28532768765444f;
+        float Reyedepth = Baselinelength / (float)Math.Sqrt(Math.Pow((Reye1x - Reye2x)/xf, 2) + Math.Pow((Reye1y - Reye2y)/yf, 2));
+        float Rx = ((Reye1x + Reye2x) / 2-xc)*Reyedepth/xf;
+        float Ry = -((Reye1y + Reye2y) / 2 - yc) * Reyedepth / yf;
+        trueReye.transform.position = new Vector3(Rx * distmultiplier, Ry * distmultiplier, Reyedepth * distmultiplier);
+        float Leyedepth = Baselinelength / (float)Math.Sqrt(Math.Pow((Leye1x - Leye2x) / xf, 2) + Math.Pow((Leye1y - Leye2y) / yf, 2));
+        float Lx = ((Leye1x + Leye2x) / 2 - xc) * Leyedepth / xf;
+        float Ly = -((Leye1y + Leye2y) / 2 - yc) * Leyedepth / yf;
+        trueLeye.transform.position = new Vector3(Lx * distmultiplier, Ly * distmultiplier, Leyedepth * distmultiplier);
+        Rcam.focalLength = Reyedepth*distmultiplier*1000 * Rcam.sensorSize.x/600f;
+        Rcam.lensShift = new Vector2(Rx / 0.6f*distmultiplier,-Ry/0.335f*distmultiplier - 0.5f);
+        Lcam.focalLength = Leyedepth * distmultiplier * 1000 * Lcam.sensorSize.x / 600f;
+        Lcam.lensShift = new Vector2(Lx / 0.6f * distmultiplier, -Ly / 0.335f * distmultiplier - 0.5f);
+        Debug.Log((trueReye.transform.position-trueLeye.transform.position).magnitude*1000);
+    }
+    void frame1update()
+    {
+
+        lock (frameLock)
+        {
+            // バックグラウンドスレッドから新しいフレームが提供されていなければ、何もしない
+            if (!newFrameAvailable1)
+            {
+                return;
+            }
+            // 新しいフレームをコピーし、フラグをリセット
+            latestFrame1.CopyTo(frame1);
+            newFrameAvailable1 = false;
+        }
+        if (frame1.Empty()) return;
+        // 歪み補正
+        Cv2.Remap(frame1, undistortedFrame1, map1, map2, InterpolationFlags.Linear);
+        if (undistortedFrame1.Empty()) return;
+        // BGRからRGBに色変換
+        Cv2.CvtColor(undistortedFrame1, rgbFrame1, ColorConversionCodes.BGR2RGB);
+        // Texture2Dとbyte配列の初期化/サイズ確認
+        if (outputTexture1 == null || outputTexture1.width != rgbFrame1.Width || outputTexture1.height != rgbFrame1.Height)
+        {
+            outputTexture1 = new Texture2D(rgbFrame1.Width, rgbFrame1.Height, TextureFormat.RGB24, false);
+            pixelData1 = new byte[rgbFrame1.Total() * rgbFrame1.ElemSize()];
+        }
+        // MatからTexture2Dへピクセルデータを転送
+        Marshal.Copy(rgbFrame1.Data, pixelData1, 0, pixelData1.Length);
+        outputTexture1.LoadRawTextureData(pixelData1);
+        outputTexture1.Apply();
+        Cv2.Resize(rgbFrame1, resizedRgbFrame1, new Size(1920, 1080), 0, 0, InterpolationFlags.Linear);
+        // MediaPipe用Texture2Dとbyte配列の初期化/サイズ確認
+        if (mediaPipeTexture1 == null || mediaPipeTexture1.width != resizedRgbFrame1.Width || mediaPipeTexture1.height != resizedRgbFrame1.Height)
+        {
+            mediaPipeTexture1 = new Texture2D(resizedRgbFrame1.Width, resizedRgbFrame1.Height, TextureFormat.RGB24, false);
+            mediaPipePixelData1 = new byte[resizedRgbFrame1.Total() * resizedRgbFrame1.ElemSize()];
+        }
+        // リサイズ後のMatからMediaPipe用のTexture2Dへピクセルデータを転送
+        Marshal.Copy(resizedRgbFrame1.Data, mediaPipePixelData1, 0, mediaPipePixelData1.Length);
+        mediaPipeTexture1.LoadRawTextureData(mediaPipePixelData1);
+        mediaPipeTexture1.Apply();
+        var image = new Mediapipe.Image(outputTexture1);
+        var result = faceLandmarker.DetectForVideo(image, stopwatch.ElapsedMilliseconds);
+        if (result.faceLandmarks != null && result.faceLandmarks.Count > 0)
+        {
+            Reye1x = result.faceLandmarks[0].landmarks[468].x * camwidth;
+            Reye1y = result.faceLandmarks[0].landmarks[468].y * camheight;
+            Leye1x = result.faceLandmarks[0].landmarks[473].x * camwidth;
+            Leye1y = result.faceLandmarks[0].landmarks[473].y * camheight;
+            Reye.transform.position = new Vector3((0.5f - result.faceLandmarks[0].landmarks[468].x) * 16 / 9 * 10, 0, (0.5f - result.faceLandmarks[0].landmarks[468].y) * 10);
+            Leye.transform.position = new Vector3((0.5f - result.faceLandmarks[0].landmarks[473].x) * 16 / 9 * 10, 0, (0.5f - result.faceLandmarks[0].landmarks[473].y) * 10);
+        }
+        if (outputTexture1 != null && displayRenderTexture1 != null)
+        {
+            Graphics.Blit(outputTexture1, displayRenderTexture1);
+        }
+    }
+    void frame2update()
+    {
+
+        lock (frameLock2)
+        {
+            // バックグラウンドスレッドから新しいフレームが提供されていなければ、何もしない
+            if (!newFrameAvailable2)
+            {
+                return;
+            }
+            // 新しいフレームをコピーし、フラグをリセット
+            latestFrame2.CopyTo(frame2);
+            newFrameAvailable2 = false;
+        }
+        if (frame2.Empty()) return;
+        // 歪み補正
+        Cv2.Remap(frame2, undistortedFrame2, map1, map2, InterpolationFlags.Linear);
+        if (undistortedFrame2.Empty()) return;
+        // BGRからRGBに色変換
+        Cv2.CvtColor(undistortedFrame2, rgbFrame2, ColorConversionCodes.BGR2RGB);
+        // Texture2Dとbyte配列の初期化/サイズ確認
+        if (outputTexture2 == null || outputTexture2.width != rgbFrame2.Width || outputTexture2.height != rgbFrame2.Height)
+        {
+            outputTexture2 = new Texture2D(rgbFrame2.Width, rgbFrame2.Height, TextureFormat.RGB24, false);
+            pixelData2 = new byte[rgbFrame2.Total() * rgbFrame2.ElemSize()];
+        }
+        // MatからTexture2Dへピクセルデータを転送
+        Marshal.Copy(rgbFrame2.Data, pixelData2, 0, pixelData2.Length);
+        outputTexture2.LoadRawTextureData(pixelData2);
+        outputTexture2.Apply();
+        Cv2.Resize(rgbFrame2, resizedRgbFrame2, new Size(1920,1080), 0, 0, InterpolationFlags.Linear);//重い場合はここを下げると少しマシになる
+        // MediaPipe用Texture2Dとbyte配列の初期化/サイズ確認
+        if (mediaPipeTexture2 == null || mediaPipeTexture2.width != resizedRgbFrame2.Width || mediaPipeTexture2.height != resizedRgbFrame2.Height)
+        {
+            mediaPipeTexture2 = new Texture2D(resizedRgbFrame2.Width, resizedRgbFrame2.Height, TextureFormat.RGB24, false);
+            mediaPipePixelData2 = new byte[resizedRgbFrame2.Total() * resizedRgbFrame2.ElemSize()];
+        }
+        // リサイズ後のMatからMediaPipe用のTexture2Dへピクセルデータを転送
+        Marshal.Copy(resizedRgbFrame2.Data, mediaPipePixelData2, 0, mediaPipePixelData2.Length);
+        mediaPipeTexture2.LoadRawTextureData(mediaPipePixelData2);
+        mediaPipeTexture2.Apply();
+        var image = new Mediapipe.Image(outputTexture2);
+        var result = faceLandmarker2.DetectForVideo(image, stopwatch.ElapsedMilliseconds);
+        if (result.faceLandmarks != null && result.faceLandmarks.Count > 0)
+        {
+            Reye2x = result.faceLandmarks[0].landmarks[468].x * camwidth;
+            Reye2y = result.faceLandmarks[0].landmarks[468].y * camheight;
+            Leye2x = result.faceLandmarks[0].landmarks[473].x * camwidth;
+            Leye2y = result.faceLandmarks[0].landmarks[473].y * camheight;
+            Reye2.transform.position = new Vector3((0.5f - result.faceLandmarks[0].landmarks[468].x) * 16 / 9 * 10, 0, (0.5f - result.faceLandmarks[0].landmarks[468].y) * 10);
+            Leye2.transform.position = new Vector3((0.5f - result.faceLandmarks[0].landmarks[473].x) * 16 / 9 * 10, 0, (0.5f - result.faceLandmarks[0].landmarks[473].y) * 10);
+        }
+        if (outputTexture2 != null && displayRenderTexture2 != null)
+        {
+            Graphics.Blit(outputTexture2, displayRenderTexture2);
+        }
+    }
+
+
+    // シーン終了時やオブジェクト破棄時に呼ばれる
+    void OnDestroy()
+    {
+        // スレッドを停止
+        isThreadRunning = false;
+        cameraThread1?.Join(); // スレッドが終了するのを待つ
+        cameraThread2?.Join();
+
+        // 全てのリソースを解放
+        capture1?.Dispose();
+        frame1?.Dispose();
+        undistortedFrame1?.Dispose();
+        cameraMatrix?.Dispose();
+        distCoeffs?.Dispose();
+        rgbFrame1?.Dispose();
+        map1?.Dispose();
+        map2?.Dispose();
+        resizedRgbFrame1?.Dispose();
+        latestFrame1?.Dispose();
+
+        capture2?.Dispose();
+        frame2?.Dispose();
+        undistortedFrame2?.Dispose();
+        rgbFrame2?.Dispose();
+        resizedRgbFrame2?.Dispose();
+        latestFrame2?.Dispose();
+    }
+
+    /// <summary>
+    /// Resourcesフォルダからキャリブレーションデータを読み込む
+    /// </summary>
+    /// <returns>読み込みに成功したか</returns>
+    private bool LoadCalibrationData()
+    {
+        // ResourcesフォルダからXMLファイルをTextAssetとして読み込む (拡張子は不要)
+        TextAsset calibrationFile = Resources.Load<TextAsset>("calibration");
+
+        if (calibrationFile == null)
+        {
+            Debug.LogError("Resourcesフォルダに calibration.xml が見つかりません。");
+            return false;
+        }
+
+        try
+        {
+            // TextAssetのテキストデータをメモリから直接FileStorageに読み込ませる
+            using (var fs = new FileStorage(calibrationFile.text, FileStorage.Modes.Read | FileStorage.Modes.Memory))
+            {
+                if (!fs.IsOpened())
+                {
+                    Debug.LogError("FileStorageを開けませんでした。XMLの内容が不正な可能性があります。");
+                    return false;
+                }
+
+                cameraMatrix = fs["camera_matrix"].ReadMat();
+                distCoeffs = fs["distortion_coefficients"].ReadMat();
+
+                if (cameraMatrix.Empty() || distCoeffs.Empty())
+                {
+                    Debug.LogError("XMLファイルからデータを正しく読み込めませんでした。キー名（'camera_matrix', 'distortion_coefficients'）が正しいか確認してください。");
+                    return false;
+                }
+            }
+
+            Debug.Log("キャリブレーションデータを正常に読み込みました。");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"キャリブレーションデータの読み込み中にエラーが発生しました: {ex.Message}");
+            return false;
+        }
+    }
+}

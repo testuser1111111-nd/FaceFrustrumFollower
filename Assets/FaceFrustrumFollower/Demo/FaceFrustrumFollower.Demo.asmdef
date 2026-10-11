@@ -1,0 +1,4 @@
+{
+  "name": "FaceFrustrumFollower.Demo",
+  "references": ["FaceFrustrumFollower.Core", "FaceFrustrumFollower.Runtime"]
+}

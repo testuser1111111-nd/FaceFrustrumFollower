@@ -1,0 +1,8 @@
+{
+  "name": "FaceFrustrumFollower.Tests",
+  "references": ["FaceFrustrumFollower.Core", "FaceFrustrumFollower.Runtime", "Mediapipe.Runtime"],
+  "includePlatforms": ["Editor"],
+  "overrideReferences": true,
+  "precompiledReferences": ["nunit.framework.dll", "OpenCvSharp.dll"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}

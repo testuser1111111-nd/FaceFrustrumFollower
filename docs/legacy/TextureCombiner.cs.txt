@@ -1,0 +1,60 @@
+// ファイル名: TextureCombiner.cs
+using UnityEngine;
+
+[ExecuteInEditMode] // エディタ上でも動作確認できるようにする
+public class TextureCombiner : MonoBehaviour
+{
+    [Header("入力")]
+    public RenderTexture sourceR;       // R成分を取得するRenderTexture
+    public RenderTexture sourceGB;      // GB成分を取得するRenderTexture
+
+    [Header("出力")]
+    public RenderTexture destination;   // 合成結果を書き込むRenderTexture
+
+    private Material combineMaterial;   // CombineChannelsシェーダーを使うマテリアル
+
+    void OnEnable()
+    {
+        // シェーダーを探してマテリアルを生成
+        Shader shader = Shader.Find("Unlit/CombineChannels");
+        if (shader != null)
+        {
+            combineMaterial = new Material(shader);
+        }
+        else
+        {
+            Debug.LogError("Shader 'Unlit/CombineChannels' not found. Make sure the shader file exists.");
+        }
+    }
+
+    // publicなメソッドとして、外部からいつでも呼び出せるようにする
+    public void Combine()
+    {
+        if (sourceR == null || sourceGB == null || destination == null)
+        {
+            Debug.LogError("入力または出力のRenderTextureが設定されていません。");
+            return;
+        }
+
+        if (combineMaterial == null)
+        {
+            Debug.LogError("マテリアルが初期化されていません。");
+            return;
+        }
+
+        // シェーダーの`_SecondTex`プロパティに、GB成分用のテクスチャをセット
+        combineMaterial.SetTexture("_SecondTex", sourceGB);
+
+        // Graphics.Blitを使って合成処理を実行
+        // sourceRが_MainTexとしてシェーダーに渡される
+        Graphics.Blit(sourceR, destination, combineMaterial);
+
+        Debug.Log("RenderTextures combined successfully.");
+    }
+
+    // テスト用にキー入力で実行する例
+    void Update()
+    {
+        Combine();
+    }
+}

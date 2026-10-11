@@ -1,0 +1,5 @@
+{
+  "name": "FaceFrustrumFollower.PlayModeTests",
+  "references": ["FaceFrustrumFollower.Core", "FaceFrustrumFollower.Runtime", "FaceFrustrumFollower.Demo"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}

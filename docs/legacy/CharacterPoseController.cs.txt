@@ -1,0 +1,52 @@
+using UnityEngine;
+
+public class CharacterPoseController : MonoBehaviour
+{
+    [SerializeField] private Animator animator;
+
+    // ポーズIDの定義（LLMのFunction Calling定義と一致させる）
+    public enum PoseType
+    {
+        Idle = 0,
+        Waving = 1,
+        HeadNodYes = 2,
+        SillyDance = 3,
+    }
+
+    // 初期化
+    void Start()
+    {
+        if (animator == null) animator = GetComponent<Animator>();
+    }
+
+    /// <summary>
+    /// 外部（LLM管理スクリプト）からこの関数を呼び出す
+    /// </summary>
+    /// <param name="poseId">実行したいポーズのID</param>
+    public void PerformPose(int poseId)
+    {
+        // 0番(Idle)の場合は強制的にリセットなどの処理を入れても良い
+        if (poseId == 0) return;
+
+        // 1. どのポーズをするかセット
+        animator.SetInteger("PoseID", poseId);
+
+        // 2. 遷移のトリガーを引く
+        animator.SetTrigger("DoGesture");
+
+        Debug.Log($"Pose Triggered: {(PoseType)poseId}");
+    }
+
+    // LLMが Function Call で {"gesture_id": "nod"} のように文字列で返してきた場合の変換用
+    public void PerformPoseByName(string poseName)
+    {
+        if (System.Enum.TryParse(poseName, true, out PoseType result))
+        {
+            PerformPose((int)result);
+        }
+        else
+        {
+            Debug.LogWarning($"Unknown Pose Name: {poseName}");
+        }
+    }
+}

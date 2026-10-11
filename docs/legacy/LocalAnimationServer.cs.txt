@@ -1,0 +1,132 @@
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+using UnityEngine;
+
+[RequireComponent(typeof(CharacterPoseController))] // 前回作った制御スクリプトを必須にする
+public class LocalAnimationServer : MonoBehaviour
+{
+    [Header("Server Settings")]
+    [SerializeField] private int port = 8080;
+    private HttpListener _listener;
+    private Thread _listenerThread;
+    private bool _isRunning = false;
+
+    // メインスレッドで処理するためのキュー（スレッドセーフ）
+    private ConcurrentQueue<string> _actionQueue = new ConcurrentQueue<string>();
+
+    // アニメーション制御用コンポーネントへの参照
+    private CharacterPoseController _poseController;
+
+    void Start()
+    {
+        _poseController = GetComponent<CharacterPoseController>();
+        StartServer();
+    }
+
+    void OnDestroy()
+    {
+        StopServer();
+    }
+
+    void Update()
+    {
+        // メインスレッドでキューの中身を消化する
+        // (通信スレッドから直接Animatorを触るとUnityがクラッシュするため)
+        while (_actionQueue.TryDequeue(out string json))
+        {
+            ProcessJson(json);
+        }
+    }
+
+    // --- サーバー処理 (別スレッド) ---
+    private void StartServer()
+    {
+        _listener = new HttpListener();
+        _listener.Prefixes.Add($"http://localhost:{port}/");
+        _listener.Start();
+        _isRunning = true;
+
+        _listenerThread = new Thread(ListenLoop);
+        _listenerThread.Start();
+
+        Debug.Log($"Animation Server Started on port {port}");
+    }
+
+    private void StopServer()
+    {
+        _isRunning = false;
+        if (_listener != null)
+        {
+            _listener.Stop();
+            _listener.Close();
+            _listener = null;
+        }
+    }
+
+    private void ListenLoop()
+    {
+        while (_isRunning && _listener != null && _listener.IsListening)
+        {
+            try
+            {
+                // リクエスト待機
+                var context = _listener.GetContext(); // ブロック処理
+                var request = context.Request;
+                var response = context.Response;
+
+                if (request.HttpMethod == "POST" && request.Url.AbsolutePath == "/action")
+                {
+                    // ボディ（JSON）を読み取る
+                    using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                    {
+                        string json = reader.ReadToEnd();
+                        // メインスレッドで実行するためにキューに入れる
+                        _actionQueue.Enqueue(json);
+                    }
+
+                    // レスポンスを返す
+                    byte[] buffer = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
+                    response.ContentLength64 = buffer.Length;
+                    response.OutputStream.Write(buffer, 0, buffer.Length);
+                }
+
+                response.Close();
+            }
+            catch (Exception e)
+            {
+                if (_isRunning) Debug.LogError($"Server Error: {e.Message}");
+            }
+        }
+    }
+
+    // --- JSON解析と実行 ---
+    [Serializable]
+    public class ActionRequest
+    {
+        public string gesture; // "wave", "nod" etc.
+    }
+
+    private void ProcessJson(string json)
+    {
+        try
+        {
+            // JSONパース
+            var data = JsonUtility.FromJson<ActionRequest>(json);
+
+            if (!string.IsNullOrEmpty(data.gesture))
+            {
+                Debug.Log($"Received Command: {data.gesture}");
+                // 前回の CharacterPoseController の関数を呼ぶ
+                _poseController.PerformPoseByName(data.gesture);
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"JSON Parse Error: {e.Message}");
+        }
+    }
+}

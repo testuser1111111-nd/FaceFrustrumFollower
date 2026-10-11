@@ -1,0 +1,5 @@
+{
+  "name": "FaceFrustrumFollower.Runtime",
+  "rootNamespace": "FaceFrustrumFollower",
+  "references": ["FaceFrustrumFollower.Core", "Mediapipe.Runtime"]
+}
